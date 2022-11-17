@@ -117,6 +117,8 @@ typedef struct {
     uint32_t tx_version;
     uint32_t locktime;
 
+    merkleized_map_commitment_t global_map;
+
     unsigned int n_inputs;
     uint8_t inputs_root[32];  // merkle root of the vector of input maps commitments
     unsigned int n_outputs;
@@ -509,14 +511,13 @@ static bool __attribute__((noinline))
 init_global_state(dispatcher_context_t *dc, sign_psbt_state_t *st) {
     LOG_PROCESSOR(__FILE__, __LINE__, __func__);
 
-    merkleized_map_commitment_t global_map;
-    if (!buffer_read_varint(&dc->read_buffer, &global_map.size)) {
+    if (!buffer_read_varint(&dc->read_buffer, &st->global_map.size)) {
         SEND_SW(dc, SW_WRONG_DATA_LENGTH);
         return false;
     }
 
-    if (!buffer_read_bytes(&dc->read_buffer, global_map.keys_root, 32) ||
-        !buffer_read_bytes(&dc->read_buffer, global_map.values_root, 32)) {
+    if (!buffer_read_bytes(&dc->read_buffer, st->global_map.keys_root, 32) ||
+        !buffer_read_bytes(&dc->read_buffer, st->global_map.values_root, 32)) {
         SEND_SW(dc, SW_WRONG_DATA_LENGTH);
         return false;
     }
@@ -557,7 +558,9 @@ init_global_state(dispatcher_context_t *dc, sign_psbt_state_t *st) {
 
     {  // process global map
         // Check integrity of the global map
-        if (call_check_merkle_tree_sorted(dc, global_map.keys_root, (size_t) global_map.size) < 0) {
+        if (call_check_merkle_tree_sorted(dc,
+                                          st->global_map.keys_root,
+                                          (size_t) st->global_map.size) < 0) {
             SEND_SW(dc, SW_INCORRECT_DATA);
             return false;
         }
@@ -567,7 +570,7 @@ init_global_state(dispatcher_context_t *dc, sign_psbt_state_t *st) {
 
         // Read tx version
         result_len = call_get_merkleized_map_value(dc,
-                                                   &global_map,
+                                                   &st->global_map,
                                                    (uint8_t[]){PSBT_GLOBAL_TX_VERSION},
                                                    1,
                                                    raw_result,
@@ -583,7 +586,7 @@ init_global_state(dispatcher_context_t *dc, sign_psbt_state_t *st) {
         // preferred height/block locktime. If that's relevant, the client must set the fallback
         // locktime to the appropriate value before calling sign_psbt.
         result_len = call_get_merkleized_map_value(dc,
-                                                   &global_map,
+                                                   &st->global_map,
                                                    (uint8_t[]){PSBT_GLOBAL_FALLBACK_LOCKTIME},
                                                    1,
                                                    raw_result,
@@ -1293,6 +1296,214 @@ process_outputs(dispatcher_context_t *dc, sign_psbt_state_t *st) {
             ++st->change_count;
         }
     }
+
+    return true;
+}
+
+#define MAX_COMMITMENT_TX_SIZE 512
+
+bool is_good_output_script(uint8_t revocation_pubkey[static 33],
+                           uint8_t delayed_pubkey[static 33],
+                           uint8_t target_script[static 34]) {
+    // TODO: given revocation_pubkey and delayed_pubkey, checks if the target script is a
+    // correct P2WSH tx that refunds to this device
+
+    if (target_script[0] != 0 || target_script[1] != 32) {
+        return false;
+    }
+
+    uint8_t script[] = {0x63, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  //
+                        0x67, 0x02, 0xd0, 0x02, 0xb2, 0x75, 0x21,                          //
+                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  //
+                        0x68, 0xac};
+
+    memcpy(script + 2, revocation_pubkey, 33);
+    memcpy(script + 2 + 33 + 7, delayed_pubkey, 33);
+
+    uint8_t script_hash[32];
+    cx_hash_sha256(script, sizeof(script), script_hash, 32);
+
+    return memcmp(script_hash, target_script + 2, 32) == 0;
+}
+
+static bool __attribute__((noinline))
+check_commit_tx(dispatcher_context_t *dc, sign_psbt_state_t *st) {
+    /** CHECK COMMIT TX
+     *
+     */
+
+    LOG_PROCESSOR(__FILE__, __LINE__, __func__);
+
+    uint8_t commitment_tx[MAX_COMMITMENT_TX_SIZE];
+
+    // Read tx version
+    int commitment_tx_len = call_get_merkleized_map_value(dc,
+                                                          &st->global_map,
+                                                          (uint8_t[]){PSBT_IN_PROPRIETARY,
+                                                                      0,
+                                                                      0x0A,
+                                                                      0x4c,
+                                                                      0x4e,
+                                                                      0x43,
+                                                                      0x4f,
+                                                                      0x4d,
+                                                                      0x4d,
+                                                                      0x49,
+                                                                      0x54,
+                                                                      0x54,
+                                                                      0x58},
+                                                          13,
+                                                          commitment_tx,
+                                                          sizeof(commitment_tx));
+    if (commitment_tx_len < 0) {
+        PRINTF("Missing commitment transaction\n");
+        SEND_SW(dc, SW_INCORRECT_DATA);
+        return false;
+    }
+
+    uint8_t revocation_pubkey[33], delayed_pubkey[33];
+
+    int revocation_pubkey_len = call_get_merkleized_map_value(dc,
+                                                              &st->global_map,
+                                                              (uint8_t[]){PSBT_IN_PROPRIETARY,
+                                                                          0,
+                                                                          0x0f,
+                                                                          0x4c,
+                                                                          0x4e,
+                                                                          0x52,
+                                                                          0x45,
+                                                                          0x56,
+                                                                          0x4f,
+                                                                          0x43,
+                                                                          0x41,
+                                                                          0x54,
+                                                                          0x49,
+                                                                          0x4f,
+                                                                          0x4e,
+                                                                          0x4b,
+                                                                          0x45,
+                                                                          0x59},
+                                                              18,
+                                                              revocation_pubkey,
+                                                              sizeof(revocation_pubkey));
+    if (revocation_pubkey_len != 33) {
+        PRINTF("Missing or wrong revocation_pubkey\n");
+        SEND_SW(dc, SW_INCORRECT_DATA);
+        return false;
+    }
+
+    int delayed_pubkey_len = call_get_merkleized_map_value(dc,
+                                                           &st->global_map,
+                                                           (uint8_t[]){PSBT_IN_PROPRIETARY,
+                                                                       0,
+                                                                       0x0c,
+                                                                       0x4c,
+                                                                       0x4e,
+                                                                       0x44,
+                                                                       0x45,
+                                                                       0x4c,
+                                                                       0x41,
+                                                                       0x59,
+                                                                       0x45,
+                                                                       0x44,
+                                                                       0x4b,
+                                                                       0x45,
+                                                                       0x59},
+                                                           15,
+                                                           delayed_pubkey,
+                                                           sizeof(delayed_pubkey));
+    if (delayed_pubkey_len != 33) {
+        PRINTF("Missing or wrong delayed_pubkey\n");
+        SEND_SW(dc, SW_INCORRECT_DATA);
+        return false;
+    }
+
+    // TODO: compute the txid of the psbt being signed
+
+    buffer_t ctx_buf = buffer_create(commitment_tx, commitment_tx_len);
+
+    uint32_t version;
+    if (!buffer_read_u32(&ctx_buf, &version, LE) || version != 2) {
+        PRINTF("Wrong transaction version in commitment tx\n");
+        return false;
+    }
+
+    uint8_t n_inputs;
+    if (!buffer_read_u8(&ctx_buf, &n_inputs) || n_inputs != 1) {
+        PRINTF("The commitment tx should only have 1 input\n");
+        return false;
+    }
+
+    // parse input
+    {
+        uint8_t prevout_txid[32];
+        if (!buffer_read_bytes(&ctx_buf, prevout_txid, 32)) {
+            PRINTF("Failed to read prevout_txid\n");
+            return false;
+        }
+        uint32_t prevout_n;
+        if (!buffer_read_u32(&ctx_buf, &prevout_n, LE)) {
+            PRINTF("Invalid prevout_n\n");
+            return false;
+        }
+
+        uint64_t sigscript_len;
+        uint8_t sigscript[MAX_PREVOUT_SCRIPTPUBKEY_LEN];
+        if (!buffer_read_varint(&ctx_buf, &sigscript_len) ||
+            sigscript_len > MAX_PREVOUT_SCRIPTPUBKEY_LEN ||
+            !buffer_read_bytes(&ctx_buf, sigscript, (int) sigscript_len)) {
+            PRINTF("Invalid sigscript_len or sigscript\n");
+            return false;
+        }
+
+        // TODO: what else do we check on the sigscript?
+
+        uint32_t sequence;
+        if (!buffer_read_u32(&ctx_buf, &sequence, LE)) {
+            PRINTF("Invalid sequence\n");
+            return false;
+        }
+        // TODO: what else do we check on the sequence number?
+    }
+
+    uint8_t n_outputs;
+    if (!buffer_read_u8(&ctx_buf, &n_outputs) || n_outputs != 2) {
+        PRINTF("The commitment tx should have exactly 2 outputs\n");
+        return false;
+    }
+
+    // parse outputs
+    bool found_good_output = false;
+    for (int i = 0; i < 2; i++) {
+        uint64_t amount;
+        if (!buffer_read_u64(&ctx_buf, &amount, LE)) {
+            PRINTF("Invalid output amount\n");
+            return false;
+        }
+
+        uint64_t scriptpubkey_len;
+        uint8_t scriptpubkey[MAX_OUTPUT_SCRIPTPUBKEY_LEN];
+        if (!buffer_read_varint(&ctx_buf, &scriptpubkey_len) || scriptpubkey_len != 34 ||
+            !buffer_read_bytes(&ctx_buf, scriptpubkey, (int) scriptpubkey_len)) {
+            PRINTF("Invalid scriptpubkey_len or scriptpubkey\n");
+            return false;
+        }
+
+        if (is_good_output_script(revocation_pubkey, delayed_pubkey, scriptpubkey)) {
+            found_good_output = true;
+        }
+    }
+
+    if (!found_good_output) {
+        PRINTF("Did not find a good output in the commitment tx\n");
+        return false;
+    }
+
+    // TODO: check prevout_n and prevout_txid are the expected ones
 
     return true;
 }
@@ -2336,6 +2547,12 @@ void handler_sign_psbt(dispatcher_context_t *dc, uint8_t p2) {
      *  Show each output that is not a change address to the user for verification.
      */
     if (!process_outputs(dc, &st)) return;
+
+    /** CHECK COMMIT TX
+     *
+     *  Verify that the commit tx is as expected
+     */
+    if (!check_commit_tx(dc, &st)) return;
 
     /** TANSACTION CONFIRMATION
      *
