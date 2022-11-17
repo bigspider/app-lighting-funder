@@ -1083,28 +1083,28 @@ show_alerts(dispatcher_context_t *dc,
         }
     }
 
-    // If there are external inputs, it is unsafe to sign, therefore we warn the user
-    if (count_external_inputs > 0) {
-        if (count_external_inputs == st->n_inputs) {
-            // no internal inputs, nothing to sign
-            PRINTF("No internal inputs. Aborting\n");
-            SEND_SW(dc, SW_INCORRECT_DATA);
-            return false;
-        } else {
-            // Swap feature: no external inputs allowed
-            if (G_swap_state.called_from_swap) {
-                PRINTF("External inputs not allowed in swap transactions\n");
-                SEND_SW(dc, SW_INCORRECT_DATA);
-                return false;
-            }
+    // // If there are external inputs, it is unsafe to sign, therefore we warn the user
+    // if (count_external_inputs > 0) {
+    //     if (count_external_inputs == st->n_inputs) {
+    //         // no internal inputs, nothing to sign
+    //         PRINTF("No internal inputs. Aborting\n");
+    //         SEND_SW(dc, SW_INCORRECT_DATA);
+    //         return false;
+    //     } else {
+    //         // Swap feature: no external inputs allowed
+    //         if (G_swap_state.called_from_swap) {
+    //             PRINTF("External inputs not allowed in swap transactions\n");
+    //             SEND_SW(dc, SW_INCORRECT_DATA);
+    //             return false;
+    //         }
 
-            // some internal and some external inputs, warn the user first
-            if (!ui_warn_external_inputs(dc)) {
-                SEND_SW(dc, SW_DENY);
-                return false;
-            }
-        }
-    }
+    //         // some internal and some external inputs, warn the user first
+    //         if (!ui_warn_external_inputs(dc)) {
+    //             SEND_SW(dc, SW_DENY);
+    //             return false;
+    //         }
+    //     }
+    // }
 
     // If any segwitv0 input is missing the non-witness-utxo, we warn the user and ask for
     // confirmation
