@@ -1106,12 +1106,12 @@ show_alerts(dispatcher_context_t *dc,
     //     }
     // }
 
-    // If any segwitv0 input is missing the non-witness-utxo, we warn the user and ask for
-    // confirmation
-    if (st->show_missing_nonwitnessutxo_warning && !ui_warn_unverified_segwit_inputs(dc)) {
-        SEND_SW(dc, SW_DENY);
-        return false;
-    }
+    // // If any segwitv0 input is missing the non-witness-utxo, we warn the user and ask for
+    // // confirmation
+    // if (st->show_missing_nonwitnessutxo_warning && !ui_warn_unverified_segwit_inputs(dc)) {
+    //     SEND_SW(dc, SW_DENY);
+    //     return false;
+    // }
 
     // If any input has non-default sighash, we warn the user
     if (st->show_nondefault_sighash_warning && !ui_warn_nondefault_sighash(dc)) {
