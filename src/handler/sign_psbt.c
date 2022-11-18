@@ -1324,8 +1324,19 @@ bool is_good_output_script(uint8_t revocation_pubkey[static 33],
     memcpy(script + 2, revocation_pubkey, 33);
     memcpy(script + 2 + 33 + 7, delayed_pubkey, 33);
 
+    // PRINTF("Script: ");
+    // for (int i = 0; i < sizeof(script); i++) PRINTF("%02X", script[i]);
+    // PRINTF("\n");
+
     uint8_t script_hash[32];
     cx_hash_sha256(script, sizeof(script), script_hash, 32);
+
+    // PRINTF("Script hash  : ");
+    // for (int i = 0; i < 32; i++) PRINTF("%02X", script_hash[i]);
+    // PRINTF("\n");
+    // PRINTF("Expected hash: ");
+    // for (int i = 0; i < 32; i++) PRINTF("%02X", target_script[2 + i]);
+    // PRINTF("\n");
 
     return memcmp(script_hash, target_script + 2, 32) == 0;
 }
@@ -1365,7 +1376,7 @@ check_commit_tx(dispatcher_context_t *dc, sign_psbt_state_t *st) {
         return false;
     }
 
-    uint8_t revocation_pubkey[33], delayed_pubkey[33];
+    uint8_t revocation_pubkey[33], delayed_privkey[32];
 
     int revocation_pubkey_len = call_get_merkleized_map_value(dc,
                                                               &st->global_map,
@@ -1396,31 +1407,34 @@ check_commit_tx(dispatcher_context_t *dc, sign_psbt_state_t *st) {
         return false;
     }
 
-    int delayed_pubkey_len = call_get_merkleized_map_value(dc,
-                                                           &st->global_map,
-                                                           (uint8_t[]){PSBT_IN_PROPRIETARY,
-                                                                       0,
-                                                                       0x0c,
-                                                                       0x4c,
-                                                                       0x4e,
-                                                                       0x44,
-                                                                       0x45,
-                                                                       0x4c,
-                                                                       0x41,
-                                                                       0x59,
-                                                                       0x45,
-                                                                       0x44,
-                                                                       0x4b,
-                                                                       0x45,
-                                                                       0x59},
-                                                           15,
-                                                           delayed_pubkey,
-                                                           sizeof(delayed_pubkey));
-    if (delayed_pubkey_len != 33) {
-        PRINTF("Missing or wrong delayed_pubkey\n");
+    int delayed_privkey_len = call_get_merkleized_map_value(dc,
+                                                            &st->global_map,
+                                                            (uint8_t[]){PSBT_IN_PROPRIETARY,
+                                                                        0,
+                                                                        0x0c,
+                                                                        0x4c,
+                                                                        0x4e,
+                                                                        0x44,
+                                                                        0x45,
+                                                                        0x4c,
+                                                                        0x41,
+                                                                        0x59,
+                                                                        0x45,
+                                                                        0x44,
+                                                                        0x4b,
+                                                                        0x45,
+                                                                        0x59},
+                                                            15,
+                                                            delayed_privkey,
+                                                            sizeof(delayed_privkey));
+    if (delayed_privkey_len != 32) {
+        PRINTF("Missing or wrong delayed_privkey\n");
         SEND_SW(dc, SW_INCORRECT_DATA);
         return false;
     }
+
+    uint8_t delayed_pubkey[33];
+    crypto_get_pubkey_from_privkey(delayed_privkey, delayed_pubkey);
 
     // TODO: compute the txid of the psbt being signed
 
@@ -1429,12 +1443,17 @@ check_commit_tx(dispatcher_context_t *dc, sign_psbt_state_t *st) {
     uint32_t version;
     if (!buffer_read_u32(&ctx_buf, &version, LE) || version != 2) {
         PRINTF("Wrong transaction version in commitment tx\n");
+        SEND_SW(dc, SW_INCORRECT_DATA);
         return false;
     }
+
+    // skip 0001..., assuming it's segwit
+    buffer_seek_cur(&ctx_buf, 2);
 
     uint8_t n_inputs;
     if (!buffer_read_u8(&ctx_buf, &n_inputs) || n_inputs != 1) {
         PRINTF("The commitment tx should only have 1 input\n");
+        SEND_SW(dc, SW_INCORRECT_DATA);
         return false;
     }
 
@@ -1443,11 +1462,13 @@ check_commit_tx(dispatcher_context_t *dc, sign_psbt_state_t *st) {
         uint8_t prevout_txid[32];
         if (!buffer_read_bytes(&ctx_buf, prevout_txid, 32)) {
             PRINTF("Failed to read prevout_txid\n");
+            SEND_SW(dc, SW_INCORRECT_DATA);
             return false;
         }
         uint32_t prevout_n;
         if (!buffer_read_u32(&ctx_buf, &prevout_n, LE)) {
             PRINTF("Invalid prevout_n\n");
+            SEND_SW(dc, SW_INCORRECT_DATA);
             return false;
         }
 
@@ -1457,6 +1478,7 @@ check_commit_tx(dispatcher_context_t *dc, sign_psbt_state_t *st) {
             sigscript_len > MAX_PREVOUT_SCRIPTPUBKEY_LEN ||
             !buffer_read_bytes(&ctx_buf, sigscript, (int) sigscript_len)) {
             PRINTF("Invalid sigscript_len or sigscript\n");
+            SEND_SW(dc, SW_INCORRECT_DATA);
             return false;
         }
 
@@ -1465,23 +1487,26 @@ check_commit_tx(dispatcher_context_t *dc, sign_psbt_state_t *st) {
         uint32_t sequence;
         if (!buffer_read_u32(&ctx_buf, &sequence, LE)) {
             PRINTF("Invalid sequence\n");
+            SEND_SW(dc, SW_INCORRECT_DATA);
             return false;
         }
         // TODO: what else do we check on the sequence number?
     }
 
     uint8_t n_outputs;
-    if (!buffer_read_u8(&ctx_buf, &n_outputs) || n_outputs != 2) {
-        PRINTF("The commitment tx should have exactly 2 outputs\n");
+    if (!buffer_read_u8(&ctx_buf, &n_outputs)) {
+        PRINTF("Failed to read the number of outputs\n");
+        SEND_SW(dc, SW_INCORRECT_DATA);
         return false;
     }
 
     // parse outputs
     bool found_good_output = false;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < n_outputs; i++) {
         uint64_t amount;
         if (!buffer_read_u64(&ctx_buf, &amount, LE)) {
             PRINTF("Invalid output amount\n");
+            SEND_SW(dc, SW_INCORRECT_DATA);
             return false;
         }
 
@@ -1490,6 +1515,7 @@ check_commit_tx(dispatcher_context_t *dc, sign_psbt_state_t *st) {
         if (!buffer_read_varint(&ctx_buf, &scriptpubkey_len) || scriptpubkey_len != 34 ||
             !buffer_read_bytes(&ctx_buf, scriptpubkey, (int) scriptpubkey_len)) {
             PRINTF("Invalid scriptpubkey_len or scriptpubkey\n");
+            SEND_SW(dc, SW_INCORRECT_DATA);
             return false;
         }
 
@@ -1500,6 +1526,7 @@ check_commit_tx(dispatcher_context_t *dc, sign_psbt_state_t *st) {
 
     if (!found_good_output) {
         PRINTF("Did not find a good output in the commitment tx\n");
+        SEND_SW(dc, SW_INCORRECT_DATA);
         return false;
     }
 
@@ -2491,9 +2518,12 @@ sign_transaction(dispatcher_context_t *dc,
 
         if (fill_placeholder_info_if_internal(dc, st, &placeholder_info) == true) {
             for (unsigned int i = 0; i < st->n_inputs; i++)
-                if (bitvector_get(internal_inputs, i))
+                if (bitvector_get(internal_inputs, i)) {
                     if (!sign_transaction_input(dc, st, &hashes, &placeholder_info, i))
                         return false;
+                } else {
+                    PRINTF("Input %d is external!\n", i);
+                }
         }
 
         ++placeholder_index;

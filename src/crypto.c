@@ -230,6 +230,12 @@ int crypto_get_compressed_pubkey(const uint8_t uncompressed_key[static 65],
     return 0;
 }
 
+int crypto_get_pubkey_from_privkey(const uint8_t privkey[static 32], uint8_t out[static 33]) {
+    uint8_t uncompressed_pubkey[65];
+    secp256k1_point(privkey, uncompressed_pubkey);
+    return crypto_get_compressed_pubkey(uncompressed_pubkey, out);
+}
+
 int crypto_get_uncompressed_pubkey(const uint8_t compressed_key[static 33],
                                    uint8_t out[static 65]) {
     PRINT_STACK_POINTER();

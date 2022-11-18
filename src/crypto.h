@@ -205,6 +205,9 @@ void crypto_hash160(const uint8_t *in, uint16_t in_len, uint8_t *out);
  */
 int crypto_get_compressed_pubkey(const uint8_t uncompressed_key[static 65], uint8_t out[static 33]);
 
+// TODO: docs
+int crypto_get_pubkey_from_privkey(const uint8_t privkey[static 32], uint8_t out[static 33]);
+
 /**
  * Computes the 65-bytes uncompressed public key from the compressed 33-bytes public key.
  *
